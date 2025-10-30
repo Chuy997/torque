@@ -1,80 +1,129 @@
 <?php
-include 'config.php';
-include 'header.php';
-session_start();
+// /var/www/html/torque/actualizar_torque.php
+require_once __DIR__ . '/includes/bootstrap.php'; // sesión segura + helpers + $conn
+require_login('admin'); // sólo Admin puede actualizar torques
 
-if (!isset($_SESSION['username']) || $_SESSION['role'] != 'admin') {
-    header("Location: login.php");
-    exit();
-}
+include __DIR__ . '/header.php';
 
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $torqueID = sanitize_input($_POST['torque_id']);
-    $status = sanitize_input($_POST['status']);
-    $reason = sanitize_input($_POST['reason']);
-    
+$errors = [];
+$ok     = null;
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    // CSRF obligatorio
+    csrf_verify_or_die($_POST['csrf_token'] ?? null);
+
+    // Entradas
+    $torqueID   = trim((string)($_POST['torque_id'] ?? ''));
+    $status     = trim((string)($_POST['status'] ?? ''));
+    $reason     = trim((string)($_POST['reason'] ?? ''));
+    $newTorqueS = trim((string)($_POST['new_torque'] ?? ''));
+
+    // Validaciones
+    if ($torqueID === '' || !preg_match('/^[A-Za-z0-9._-]{1,50}$/', $torqueID)) {
+        $errors[] = 'Torque ID inválido.';
+    }
+    $allowed_status = ['activo','fuera de uso','calibracion fallida'];
+    if (!in_array($status, $allowed_status, true)) {
+        $errors[] = 'Estado inválido.';
+    }
+    if ($reason === '' || mb_strlen($reason) > 255) {
+        $errors[] = 'Motivo requerido (máx 255).';
+    }
+
     $newTorque = null;
-    if (isset($_POST['new_torque']) && !empty($_POST['new_torque'])) {
-        $newTorque = sanitize_input($_POST['new_torque']);
+    if ($newTorqueS !== '') {
+        if (!is_numeric($newTorqueS)) {
+            $errors[] = 'El nuevo torque debe ser numérico.';
+        } else {
+            $newTorque = (float)$newTorqueS;
+        }
     }
-    
-    if ($status == 'activo' && $newTorque === null) {
-        echo "Debe proporcionar un nuevo valor de torque para activar el torque.";
-    } else {
-        if ($status == 'fuera de uso' || $status == 'calibracion fallida') {
-            $updateQuery = "UPDATE Torques SET status = ? WHERE torqueID = ?";
-            $stmt = $conn->prepare($updateQuery);
+
+    // Reglas de negocio
+    if ($status === 'activo' && $newTorque === null) {
+        $errors[] = 'Para activar se requiere un valor de torque nuevo.';
+    }
+
+    // Verificar que el torque exista
+    if (empty($errors)) {
+        $q = $conn->prepare("SELECT torque, status FROM torques WHERE torqueID = ?");
+        $q->bind_param('s', $torqueID);
+        $q->execute();
+        $res = $q->get_result();
+        if ($res->num_rows === 0) {
+            $errors[] = 'No existe un torque con ese ID.';
+        } else {
+            $current = $res->fetch_assoc();
+        }
+    }
+
+    // Ejecutar cambios
+    if (empty($errors)) {
+        if ($status === 'fuera de uso' || $status === 'calibracion fallida') {
+            // Sólo cambiar estado
+            $stmt = $conn->prepare("UPDATE torques SET status = ? WHERE torqueID = ?");
             $stmt->bind_param('ss', $status, $torqueID);
+            $action = "Estado cambiado a {$status}. Motivo: {$reason}";
         } else {
-            $updateQuery = "UPDATE Torques SET torque = ?, status = ? WHERE torqueID = ?";
-            $stmt = $conn->prepare($updateQuery);
+            // Activo: requiere nuevo torque
+            $stmt = $conn->prepare("UPDATE torques SET torque = ?, status = ? WHERE torqueID = ?");
             $stmt->bind_param('dss', $newTorque, $status, $torqueID);
+            $action = "Torque actualizado a {$newTorque}, estado cambiado a {$status}. Motivo: {$reason}";
         }
-        $stmt->execute();
-        
-        if ($stmt->affected_rows > 0) {
-            $historyQuery = "INSERT INTO History (torqueID, action) VALUES (?, ?)";
-            $historyStmt = $conn->prepare($historyQuery);
-            $action = "Estado cambiado a $status. Motivo: $reason";
-            if ($newTorque !== null) {
-                $action = "Torque actualizado a $newTorque, estado cambiado a $status. Motivo: $reason";
-            }
-            $historyStmt->bind_param('ss', $torqueID, $action);
-            $historyStmt->execute();
-            
-            echo "Torque actualizado correctamente.";
-        } else {
-            echo "No se encontró el torque o no se realizaron cambios.";
+
+        try {
+            $stmt->execute();
+
+            // Registrar historial
+            $h = $conn->prepare("INSERT INTO history (torqueID, action) VALUES (?, ?)");
+            $h->bind_param('ss', $torqueID, $action);
+            $h->execute();
+
+            $ok = 'Torque actualizado correctamente.';
+        } catch (mysqli_sql_exception $e) {
+            $errors[] = 'No se pudo actualizar el torque.';
         }
     }
 }
 
-function sanitize_input($data) {
-    return htmlspecialchars(stripslashes(trim($data)));
-}
-
-// Obtener los torques activos para mostrarlos en el formulario
-$query = "SELECT torqueID, torque, status FROM Torques WHERE status = 'activo'";
-$result = $conn->query($query);
+// Obtener torques activos para el selector (mantenemos lógica original)
+$list = $conn->query("SELECT torqueID, torque, status FROM torques WHERE status = 'activo' ORDER BY torqueID ASC");
 ?>
-
 <main class="container mt-5">
     <h1 class="mb-4">Actualizar Torque</h1>
-    <form action="" method="POST">
+
+    <?php if (!empty($errors)): ?>
+        <div class="alert alert-danger" role="alert">
+            <?= htmlspecialchars(implode(' ', $errors), ENT_QUOTES, 'UTF-8') ?>
+        </div>
+    <?php elseif (!empty($ok)): ?>
+        <div class="alert alert-success" role="alert">
+            <?= htmlspecialchars($ok, ENT_QUOTES, 'UTF-8') ?>
+        </div>
+    <?php endif; ?>
+
+    <form action="" method="POST" autocomplete="off" novalidate>
+        <?= csrf_field() ?>
         <div class="form-group">
             <label for="torque_id">Seleccionar Torque ID:</label>
             <select id="torque_id" name="torque_id" class="form-control" required>
-                <?php while($row = $result->fetch_assoc()): ?>
-                <option value="<?= htmlspecialchars($row['torqueID']) ?>">
-                    <?= htmlspecialchars($row['torqueID']) ?> (Torque Actual: <?= htmlspecialchars($row['torque']) ?>, Estado: <?= htmlspecialchars($row['status']) ?>)
-                </option>
+                <?php while ($row = $list->fetch_assoc()): ?>
+                    <label>
+                        <option value="<?= htmlspecialchars($row['torqueID'], ENT_QUOTES, 'UTF-8') ?>">
+                            <?= htmlspecialchars($row['torqueID'], ENT_QUOTES, 'UTF-8') ?>
+                            (Torque Actual: <?= htmlspecialchars($row['torque'], ENT_QUOTES, 'UTF-8') ?>,
+                            Estado: <?= htmlspecialchars($row['status'], ENT_QUOTES, 'UTF-8') ?>)
+                        </option>
+                    </label>
                 <?php endwhile; ?>
             </select>
         </div>
+
         <div class="form-group">
             <label for="new_torque">Nuevo Torque (Kgf/cm):</label>
-            <input type="number" id="new_torque" name="new_torque" step="0.01" class="form-control">
+            <input type="number" id="new_torque" name="new_torque" step="0.01" class="form-control" placeholder="Requerido si cambia a 'activo'">
         </div>
+
         <div class="form-group">
             <label for="status">Nuevo Estado:</label>
             <select id="status" name="status" class="form-control" required>
@@ -83,12 +132,14 @@ $result = $conn->query($query);
                 <option value="calibracion fallida">Calibración Fallida</option>
             </select>
         </div>
+
         <div class="form-group">
             <label for="reason">Motivo:</label>
-            <input type="text" id="reason" name="reason" class="form-control" required>
+            <input type="text" id="reason" name="reason" class="form-control" maxlength="255" required>
         </div>
+
         <button type="submit" class="btn btn-primary">Actualizar</button>
     </form>
 </main>
 
-<?php include 'footer.php'; ?>
+<?php include __DIR__ . '/footer.php'; ?>

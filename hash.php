@@ -5,9 +5,9 @@ include 'config.php';
 $password_admin = password_hash('admin123', PASSWORD_DEFAULT);
 $password_operator = password_hash('operator123', PASSWORD_DEFAULT);
 
-$conn->query("DELETE FROM Users");
+$conn->query("DELETE FROM users");
 
-$query = $conn->prepare("INSERT INTO Users (username, password, role) VALUES (?, ?, ?)");
+$query = $conn->prepare("INSERT INTO users (username, password, role) VALUES (?, ?, ?)");
 $query->bind_param("sss", $username, $password, $role);
 
 $username = 'admin';

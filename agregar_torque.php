@@ -1,87 +1,148 @@
 <?php
-include 'config.php';
-include 'header.php';
-session_start();
+// /var/www/html/torque/agregar_torque.php
+require_once __DIR__ . '/includes/bootstrap.php'; // sesión segura + helpers + $conn
+require_login('admin'); // sólo Admin puede dar de alta
 
-if (!isset($_SESSION['username']) || $_SESSION['role'] != 'admin') {
-    header("Location: login.php");
-    exit();
-}
+include __DIR__ . '/header.php';
 
-if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $torqueID = sanitize_input($_POST['torque_id']);
-    $fechaAlta = sanitize_input($_POST['fecha_alta']);
-    $torque = sanitize_input($_POST['torque']);
-    $SN = sanitize_input($_POST['sn']);
-    
-    $target_dir = "pictures/";
-    $target_file = $target_dir . basename($_FILES["foto"]["name"]);
-    $uploadOk = 1;
-    $imageFileType = strtolower(pathinfo($target_file, PATHINFO_EXTENSION));
-    
-    // Check if image file is a actual image or fake image
-    $check = getimagesize($_FILES["foto"]["tmp_name"]);
-    if ($check !== false) {
-        $uploadOk = 1;
+// Configuración de subida
+const MAX_BYTES = 3 * 1024 * 1024; // 3 MB
+$allowed_exts  = ['jpg','jpeg','png'];
+$allowed_mimes = ['image/jpeg','image/png'];
+
+$errors = [];
+$notice = null;
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    // CSRF
+    csrf_verify_or_die($_POST['csrf_token'] ?? null);
+
+    // Sanitizar
+    $torqueID  = trim((string)($_POST['torque_id'] ?? ''));
+    $fechaAlta = trim((string)($_POST['fecha_alta'] ?? ''));
+    $torque    = (string)($_POST['torque'] ?? '');
+    $SN        = trim((string)($_POST['sn'] ?? ''));
+
+    // Validaciones básicas
+    if ($torqueID === '' || !preg_match('/^[A-Za-z0-9._-]{1,50}$/', $torqueID)) {
+        $errors[] = 'Torque ID inválido (usa letras, números, . _ - ; máx 50).';
+    }
+    if ($fechaAlta === '' || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $fechaAlta)) {
+        $errors[] = 'Fecha de alta inválida.';
+    }
+    if ($torque === '' || !is_numeric($torque)) {
+        $errors[] = 'Torque numérico requerido.';
     } else {
-        echo "File is not an image.";
-        $uploadOk = 0;
+        $torque = (float)$torque;
     }
-    
-    // Check file size
-    if ($_FILES["foto"]["size"] > 3000000) { // 3MB
-        echo "Sorry, your file is too large.";
-        $uploadOk = 0;
+    if ($SN === '' || strlen($SN) > 50) {
+        $errors[] = 'SN requerido (máx 50).';
     }
-    
-    // Allow certain file formats
-    if ($imageFileType != "jpg" && $imageFileType != "png" && $imageFileType != "jpeg" && $imageFileType != "gif") {
-        echo "Sorry, only JPG, JPEG, PNG & GIF files are allowed.";
-        $uploadOk = 0;
-    }
-    
-    // Check if $uploadOk is set to 0 by an error
-    if ($uploadOk == 0) {
-        echo "Sorry, your file was not uploaded.";
-    // if everything is ok, try to upload file
-    } else {
-        if (move_uploaded_file($_FILES["foto"]["tmp_name"], $target_file)) {
-            // File is uploaded successfully
-            $foto = $target_file;
-            
-            // Insert into database
-            $query = "INSERT INTO Torques (torqueID, fechaAlta, foto, torque, SN) VALUES (?, ?, ?, ?, ?)";
-            $stmt = $conn->prepare($query);
-            $stmt->bind_param('sssds', $torqueID, $fechaAlta, $foto, $torque, $SN);
-            $stmt->execute();
 
-            header("Location: index.php");
-            exit();
+    // Validación de archivo
+    if (!isset($_FILES['foto']) || ($_FILES['foto']['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        $errors[] = 'Debe adjuntar una foto.';
+    } else {
+        $f = $_FILES['foto'];
+        if ($f['error'] !== UPLOAD_ERR_OK) {
+            $errors[] = 'Error al subir la foto (código '.$f['error'].').';
+        } elseif ($f['size'] > MAX_BYTES) {
+            $errors[] = 'La foto supera 3MB.';
         } else {
-            echo "Sorry, there was an error uploading your file.";
+            // Verificación por MIME real
+            $finfo = new finfo(FILEINFO_MIME_TYPE);
+            $mime  = $finfo->file($f['tmp_name']);
+            if (!in_array($mime, $allowed_mimes, true)) {
+                $errors[] = 'Formato de imagen no permitido (usa JPG o PNG).';
+            }
+        }
+    }
+
+    // Verificar duplicado de torqueID
+    if (empty($errors)) {
+        $check = $conn->prepare("SELECT 1 FROM torques WHERE torqueID = ?");
+        $check->bind_param('s', $torqueID);
+        $check->execute();
+        $exists = $check->get_result()->num_rows > 0;
+        if ($exists) {
+            $errors[] = 'Ya existe un torque con ese ID.';
+        }
+    }
+
+    if (empty($errors)) {
+        // Asegurar carpeta destino
+        $dest_dir_abs = __DIR__ . '/pictures';
+        if (!is_dir($dest_dir_abs)) {
+            // 0775 para que www-data pueda leer
+            if (!mkdir($dest_dir_abs, 0775, true) && !is_dir($dest_dir_abs)) {
+                $errors[] = 'No se pudo crear el directorio de imágenes.';
+            }
+        }
+
+        if (empty($errors)) {
+            // Extensión según MIME
+            $ext = strtolower(pathinfo($_FILES['foto']['name'], PATHINFO_EXTENSION));
+            if ($mime === 'image/jpeg') $ext = 'jpg';
+            if ($mime === 'image/png')  $ext = 'png';
+            if (!in_array($ext, $allowed_exts, true)) {
+                $errors[] = 'Extensión no permitida.';
+            } else {
+                // Nombre estandarizado <torqueID>.<ext>
+                $dest_rel = 'pictures/' . $torqueID . '.' . $ext;               // para guardar en DB
+                $dest_abs = __DIR__ . '/' . $dest_rel;                           // ruta absoluta para mover
+
+                // Mover archivo
+                if (!move_uploaded_file($_FILES['foto']['tmp_name'], $dest_abs)) {
+                    $errors[] = 'No se pudo guardar la imagen en el servidor.';
+                } else {
+                    // Permisos razonables
+                    @chmod($dest_abs, 0644);
+
+                    // Insert en BD
+                    $stmt = $conn->prepare("INSERT INTO torques (torqueID, fechaAlta, foto, torque, SN) VALUES (?, ?, ?, ?, ?)");
+                    $stmt->bind_param('sssds', $torqueID, $fechaAlta, $dest_rel, $torque, $SN);
+                    try {
+                        $stmt->execute();
+                        // Redirigir a inicio
+                        header("Location: /torque/index.php");
+                        exit();
+                    } catch (mysqli_sql_exception $e) {
+                        // Si falla el INSERT, borra la imagen para no dejar residuo
+                        @unlink($dest_abs);
+                        $errors[] = 'Error al insertar en base de datos.';
+                    }
+                }
+            }
         }
     }
 }
-
-function sanitize_input($data) {
-    return htmlspecialchars(stripslashes(trim($data)));
-}
 ?>
-
 <main class="container mt-5">
     <h1 class="mb-4">Agregar Torque</h1>
-    <form action="" method="POST" enctype="multipart/form-data">
+
+    <?php if (!empty($errors)): ?>
+        <div class="alert alert-danger" role="alert">
+            <?= htmlspecialchars(implode(' ', $errors), ENT_QUOTES, 'UTF-8') ?>
+        </div>
+    <?php elseif (!empty($notice)): ?>
+        <div class="alert alert-info" role="alert">
+            <?= htmlspecialchars($notice, ENT_QUOTES, 'UTF-8') ?>
+        </div>
+    <?php endif; ?>
+
+    <form action="" method="POST" enctype="multipart/form-data" autocomplete="off" novalidate>
+        <?= csrf_field() ?>
         <div class="form-group">
             <label for="torque_id">Torque ID:</label>
-            <input type="text" id="torque_id" name="torque_id" class="form-control" required>
+            <input type="text" id="torque_id" name="torque_id" class="form-control" maxlength="50" required>
         </div>
         <div class="form-group">
             <label for="fecha_alta">Fecha de Alta:</label>
             <input type="date" id="fecha_alta" name="fecha_alta" class="form-control" required>
         </div>
         <div class="form-group">
-            <label for="foto">Foto:</label>
-            <input type="file" id="foto" name="foto" class="form-control" required>
+            <label for="foto">Foto (JPG/PNG, máx 3MB):</label>
+            <input type="file" id="foto" name="foto" class="form-control" accept=".jpg,.jpeg,.png,image/jpeg,image/png" required>
         </div>
         <div class="form-group">
             <label for="torque">Torque (Kgf/cm):</label>
@@ -89,10 +150,10 @@ function sanitize_input($data) {
         </div>
         <div class="form-group">
             <label for="sn">SN:</label>
-            <input type="text" id="sn" name="sn" class="form-control" required>
+            <input type="text" id="sn" name="sn" class="form-control" maxlength="50" required>
         </div>
         <button type="submit" class="btn btn-primary">Agregar</button>
     </form>
 </main>
 
-<?php include 'footer.php'; ?>
+<?php include __DIR__ . '/footer.php'; ?>
