@@ -1,13 +1,11 @@
 <?php
 // /var/www/html/torque/api/tabla_calibraciones.php
 // API que devuelve la última calibración por torque (incluye promedio, resultado y próxima)
-// Usa MAX(calibrationID) por torque para evitar problemas con igualdad exacta de timestamps.
 require_once __DIR__ . '/../config.php';
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
 
 header('Content-Type: application/json; charset=utf-8');
 
+// Obtener última calibración por torque usando la fecha más reciente (no ID)
 $sql = "
   SELECT
     t.torqueID,
@@ -17,21 +15,21 @@ $sql = "
     t.status
   FROM torques t
   LEFT JOIN (
-    SELECT torqueID, MAX(calibrationID) AS lastID
+    SELECT torqueID, MAX(fechaCalibracion) AS max_fecha
     FROM calibrations
     GROUP BY torqueID
-  ) lc ON lc.torqueID = t.torqueID
+  ) latest ON latest.torqueID = t.torqueID
   LEFT JOIN calibrations c
-         ON c.calibrationID = lc.lastID
-  ORDER BY c.fechaCalibracion DESC
-  LIMIT 200
+    ON c.torqueID = latest.torqueID
+   AND c.fechaCalibracion = latest.max_fecha
+  WHERE t.status = 'activo'
+  ORDER BY t.torqueID ASC
 ";
 
 $res = $conn->query($sql);
 $tabla = [];
 
 while ($r = $res->fetch_assoc()) {
-    // Próxima esperada: SIEMPRE el siguiente LUNES
     $proxima = null;
     if (!empty($r['ultima'])) {
         $dt  = new DateTime($r['ultima']);
@@ -53,5 +51,5 @@ while ($r = $res->fetch_assoc()) {
 
 echo json_encode(
     ['tabla' => $tabla],
-    JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+    JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
 );
