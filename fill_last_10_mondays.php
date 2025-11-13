@@ -120,7 +120,7 @@ foreach ($mondays as $monday) {
 
         // Historial
         $hist = $conn->prepare("INSERT INTO history (torqueID, action, date) VALUES (?, ?, ?)");
-        $action = "Backfill: calibración simulada (lunes)";
+        $action = "calibración aprobada";
         $hist->bind_param('sss', $torqueID, $action, $fechaCalibracion);
         $hist->execute();
 
