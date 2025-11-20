@@ -1,9 +1,11 @@
 <?php
 // /var/www/html/torque/agregar_torque.php
-require_once __DIR__ . '/includes/bootstrap.php'; // sesión segura + helpers + $conn
-require_login('admin'); // sólo Admin puede dar de alta
+require_once __DIR__ . '/includes/bootstrap.php';
+require_auth('admin'); // sólo Admin puede dar de alta
 
-include __DIR__ . '/header.php';
+function h(?string $s): string { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
+
+$pdo = pdo();
 
 // Configuración de subida
 const MAX_BYTES = 3 * 1024 * 1024; // 3 MB
@@ -15,7 +17,9 @@ $notice = null;
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
     // CSRF
-    csrf_verify_or_die($_POST['csrf_token'] ?? null);
+    if (!isset($_POST['csrf']) || !csrf_validate($_POST['csrf'])) {
+        $errors[] = 'Sesión expirada. Vuelve a intentar.';
+    }
 
     // Sanitizar
     $torqueID  = trim((string)($_POST['torque_id'] ?? ''));
@@ -50,8 +54,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             $errors[] = 'La foto supera 3MB.';
         } else {
             // Verificación por MIME real
-            $finfo = new finfo(FILEINFO_MIME_TYPE);
-            $mime  = $finfo->file($f['tmp_name']);
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            $mime  = finfo_file($finfo, $f['tmp_name']);
+            finfo_close($finfo);
             if (!in_array($mime, $allowed_mimes, true)) {
                 $errors[] = 'Formato de imagen no permitido (usa JPG o PNG).';
             }
@@ -60,11 +65,9 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
     // Verificar duplicado de torqueID
     if (empty($errors)) {
-        $check = $conn->prepare("SELECT 1 FROM torques WHERE torqueID = ?");
-        $check->bind_param('s', $torqueID);
-        $check->execute();
-        $exists = $check->get_result()->num_rows > 0;
-        if ($exists) {
+        $check = $pdo->prepare("SELECT 1 FROM torques WHERE torqueID = ?");
+        $check->execute([$torqueID]);
+        if ($check->fetch()) {
             $errors[] = 'Ya existe un torque con ese ID.';
         }
     }
@@ -73,7 +76,6 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         // Asegurar carpeta destino
         $dest_dir_abs = __DIR__ . '/pictures';
         if (!is_dir($dest_dir_abs)) {
-            // 0775 para que www-data pueda leer
             if (!mkdir($dest_dir_abs, 0775, true) && !is_dir($dest_dir_abs)) {
                 $errors[] = 'No se pudo crear el directorio de imágenes.';
             }
@@ -99,14 +101,15 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                     @chmod($dest_abs, 0644);
 
                     // Insert en BD
-                    $stmt = $conn->prepare("INSERT INTO torques (torqueID, fechaAlta, foto, torque, SN) VALUES (?, ?, ?, ?, ?)");
-                    $stmt->bind_param('sssds', $torqueID, $fechaAlta, $dest_rel, $torque, $SN);
                     try {
-                        $stmt->execute();
-                        // Redirigir a inicio
-                        header("Location: /torque/index.php");
+                        $pdo->beginTransaction();
+                        $stmt = $pdo->prepare("INSERT INTO torques (torqueID, fechaAlta, foto, torque, SN) VALUES (?, ?, ?, ?, ?)");
+                        $stmt->execute([$torqueID, $fechaAlta, $dest_rel, $torque, $SN]);
+                        $pdo->commit();
+                        header("Location: index.php?notice=Torque+agregado+exitosamente");
                         exit();
-                    } catch (mysqli_sql_exception $e) {
+                    } catch (Throwable $e) {
+                        $pdo->rollBack();
                         // Si falla el INSERT, borra la imagen para no dejar residuo
                         @unlink($dest_abs);
                         $errors[] = 'Error al insertar en base de datos.';
@@ -117,21 +120,20 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     }
 }
 ?>
+<?php include __DIR__ . '/header.php'; ?>
 <main class="container mt-5">
     <h1 class="mb-4">Agregar Torque</h1>
 
     <?php if (!empty($errors)): ?>
         <div class="alert alert-danger" role="alert">
-            <?= htmlspecialchars(implode(' ', $errors), ENT_QUOTES, 'UTF-8') ?>
-        </div>
-    <?php elseif (!empty($notice)): ?>
-        <div class="alert alert-info" role="alert">
-            <?= htmlspecialchars($notice, ENT_QUOTES, 'UTF-8') ?>
+            <?php foreach ($errors as $err): ?>
+                <div><?= h($err) ?></div>
+            <?php endforeach; ?>
         </div>
     <?php endif; ?>
 
     <form action="" method="POST" enctype="multipart/form-data" autocomplete="off" novalidate>
-        <?= csrf_field() ?>
+        <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
         <div class="form-group">
             <label for="torque_id">Torque ID:</label>
             <input type="text" id="torque_id" name="torque_id" class="form-control" maxlength="50" required>

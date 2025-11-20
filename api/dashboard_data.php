@@ -1,174 +1,99 @@
 <?php
-// /var/www/html/torque/api/dashboard_data.php
-//require_once __DIR__ . '/../includes/bootstrap.php';
-//require_login();
-require_once __DIR__ . '/../config.php';
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
-
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
+require_once __DIR__ . '/../includes/bootstrap.php';
+require_auth();
 
 header('Content-Type: application/json');
+header('Cache-Control: no-cache');
 
-// === 1. KPIs ===
-$now = date('Y-m-d');
-$last30 = date('Y-m-d', strtotime('-30 days'));
-$last3m = date('Y-m-d', strtotime('-3 months'));
+try {
+    $pdo = pdo();
 
-// Aprobadas vs fallas últimos 30 días
-$sql = "SELECT resultado, COUNT(*) AS cnt
-        FROM calibrations
-        WHERE fechaCalibracion >= ?
-        GROUP BY resultado";
-$stmt = $conn->prepare($sql);
-$stmt->bind_param('s', $last30);
-$stmt->execute();
-$res = $stmt->get_result();
-$aprobadas = 0; $fallas = 0;
-while ($r = $res->fetch_assoc()) {
-    if ($r['resultado'] === 'aprobado') $aprobadas = (int)$r['cnt'];
-    else $fallas += (int)$r['cnt'];
-}
-$total = $aprobadas + $fallas;
-$kpiAprobadas = $total > 0 ? round(($aprobadas/$total)*100,1) : 0;
-$kpiFallas = $total > 0 ? round(($fallas/$total)*100,1) : 0;
+    // --- KPIs ---
+    // Total de calibraciones en últimos 30 días
+    $stmt = $pdo->prepare("
+        SELECT 
+            SUM(CASE WHEN resultado = 'aprobado' THEN 1 ELSE 0 END) AS aprobadas,
+            SUM(CASE WHEN resultado = 'fuera de tolerancia' THEN 1 ELSE 0 END) AS fallas,
+            COUNT(*) AS total_30d
+        FROM calibrations 
+        WHERE fechaCalibracion >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+    ");
+    $stmt->execute();
+    $kpi30 = $stmt->fetch(PDO::FETCH_ASSOC);
+    $total_30d = (int)($kpi30['total_30d'] ?? 0);
+    $aprobadas_pct = $total_30d > 0 ? round(100 * ($kpi30['aprobadas'] / $total_30d), 1) : 0;
+    $fallas_pct = $total_30d > 0 ? round(100 * ($kpi30['fallas'] / $total_30d), 1) : 0;
 
-// Torques fuera de uso
-$sql = "SELECT COUNT(*) AS cnt FROM torques WHERE status='fuera de uso'";
-$kpiFueraUso = $conn->query($sql)->fetch_assoc()['cnt'] ?? 0;
+    // Torques pendientes (activo pero sin calibración en últimos 30 días)
+    $stmt = $pdo->query("
+        SELECT COUNT(*) 
+        FROM torques t
+        LEFT JOIN calibrations c ON c.torqueID = t.torqueID AND c.fechaCalibracion >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+        WHERE t.status = 'activo' AND c.torqueID IS NULL
+    ");
+    $pendientes = (int)$stmt->fetchColumn();
 
-// Pendientes (usando la vista que ya creaste; ahora solo lunes)
-$sql = "SELECT COUNT(*) AS cnt FROM vw_missing_calibrations_last3m";
-$kpiPendientes = $conn->query($sql)->fetch_assoc()['cnt'] ?? 0;
+    // Torques fuera de uso
+    $stmt = $pdo->query("SELECT COUNT(*) FROM torques WHERE status IN ('fuera de uso', 'calibracion fallida')");
+    $fuera_uso = (int)$stmt->fetchColumn();
 
-// === 2. Serie semanal ===
-// Agrupa por inicio de semana (lunes) y devuelve una etiqueta legible "YYYY-MM-DD → YYYY-MM-DD"
-$sql = "SELECT
-          DATE_SUB(DATE(fechaCalibracion), INTERVAL WEEKDAY(fechaCalibracion) DAY) AS week_start,
-          SUM(resultado='aprobado') AS aprobadas,
-          SUM(resultado='fuera de tolerancia') AS fallas,
-          COUNT(*) AS total
-        FROM calibrations
-        WHERE fechaCalibracion >= ?
-        GROUP BY week_start
-        ORDER BY week_start";
-$stmt = $conn->prepare($sql);
-$stmt->bind_param('s', $last30);
-$stmt->execute();
-$res = $stmt->get_result();
-$series = [];
-while ($r = $res->fetch_assoc()) {
-    $wkStart = new DateTime($r['week_start']);
-    $wkEnd   = (clone $wkStart)->modify('+6 day');
-    $label   = $wkStart->format('Y-m-d') . ' → ' . $wkEnd->format('Y-m-d');
+    // --- Datos para gráficas (simplificados) ---
+    // Últimas 8 semanas
+    $stmt = $pdo->query("
+        SELECT 
+            YEARWEEK(fechaCalibracion, 1) AS semana,
+            SUM(CASE WHEN resultado = 'aprobado' THEN 1 ELSE 0 END) AS aprobadas,
+            SUM(CASE WHEN resultado = 'fuera de tolerancia' THEN 1 ELSE 0 END) AS fallas
+        FROM calibrations 
+        WHERE fechaCalibracion >= DATE_SUB(NOW(), INTERVAL 8 WEEK)
+        GROUP BY semana
+        ORDER BY semana
+    ");
+    $chartBar = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    $pct = ((int)$r['total'] > 0)
-        ? round(((int)$r['aprobadas'] / (int)$r['total']) * 100, 1)
-        : 0.0;
+    // Estados actuales
+    $stmt = $pdo->query("
+        SELECT status, COUNT(*) AS count
+        FROM torques
+        GROUP BY status
+    ");
+    $chartDonut = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    $series[] = [
-        'semana'     => $label,
-        'aprobadas'  => (int)$r['aprobadas'],
-        'fallas'     => (int)$r['fallas'],
-        'pct_ok'     => $pct, // % de aprobadas en esa semana
-    ];
-}
-
-// === 3. Estados torques ===
-// Devuelve SIEMPRE las 3 categorías, aunque no existan en la BD (valor 0).
-$sql = "SELECT status, COUNT(*) AS cnt FROM torques GROUP BY status";
-$res = $conn->query($sql);
-
-// defaults
-$estados = [
-    'activo'               => 0,
-    'fuera de uso'         => 0,
-    'calibracion fallida'  => 0,
-];
-
-while ($r = $res->fetch_assoc()) {
-    $status = $r['status'];
-    if (isset($estados[$status])) {
-        $estados[$status] = (int)$r['cnt'];
-    }
-}
-
-// === 3b. Pareto de fallas (últimos 3 meses) ===
-$sql = "SELECT torqueID, COUNT(*) AS fails
-        FROM calibrations
-        WHERE fechaCalibracion >= ? AND resultado='fuera de tolerancia'
-        GROUP BY torqueID
-        ORDER BY fails DESC, torqueID ASC
-        LIMIT 10";
-$stmt = $conn->prepare($sql);
-$stmt->bind_param('s', $last3m);
-$stmt->execute();
-$res = $stmt->get_result();
-$pareto = [];
-while ($r = $res->fetch_assoc()) {
-    $pareto[] = [
-        'torqueID' => $r['torqueID'],
-        'fails'    => (int)$r['fails'],
-    ];
-}
-
-// === 4. Tabla detalle (últimos 20 torques activos) ===
-// Tomamos la ÚLTIMA calibración por torque (incluye promedio y resultado)
-$sql = "SELECT
-          t.torqueID,
-          lc.ultima,
-          c.resultado,
-          c.promedio,
-          t.status
+    // --- Tabla de calibraciones recientes ---
+    $stmt = $pdo->query("
+        SELECT
+            t.torqueID,
+            c.promedio,
+            c.resultado,
+            c.fechaCalibracion,
+            t.status
         FROM torques t
         LEFT JOIN (
-          SELECT torqueID, MAX(fechaCalibracion) AS ultima
-          FROM calibrations
-          GROUP BY torqueID
-        ) lc ON lc.torqueID = t.torqueID
+            SELECT torqueID, MAX(fechaCalibracion) AS last_fecha
+            FROM calibrations
+            GROUP BY torqueID
+        ) latest ON latest.torqueID = t.torqueID
         LEFT JOIN calibrations c
-          ON c.torqueID = lc.torqueID
-         AND c.fechaCalibracion = lc.ultima
-        ORDER BY lc.ultima DESC
-        LIMIT 20";
+            ON c.torqueID = latest.torqueID
+            AND c.fechaCalibracion = latest.last_fecha
+        ORDER BY c.fechaCalibracion DESC
+        LIMIT 50
+    ");
+    $tabla = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-$res = $conn->query($sql);
+    echo json_encode([
+        'kpi' => [
+            'aprobadas_pct' => $aprobadas_pct,
+            'fallas_pct' => $fallas_pct,
+            'pendientes' => $pendientes,
+            'fuera_uso' => $fuera_uso
+        ],
+        'chartBar' => $chartBar,
+        'chartDonut' => $chartDonut,
+        'tabla' => $tabla
+    ], JSON_NUMERIC_CHECK);
 
-$tabla = [];
-while ($r = $res->fetch_assoc()) {
-    $proxima = null;
-
-    if (!empty($r['ultima'])) {
-        // Próxima esperada: SIEMPRE el siguiente LUNES
-        $dt  = new DateTime($r['ultima']);
-        $dow = (int)$dt->format('N'); // 1=Lun ... 7=Dom
-        $addDays = ($dow === 1) ? 7 : (8 - $dow);
-        $dt->modify("+{$addDays} day")->setTime(0, 0, 0);
-        $proxima = $dt->format('Y-m-d');
-    }
-
-    $tabla[] = [
-        'id'        => $r['torqueID'],
-        'ultima'    => $r['ultima'],
-        'promedio'  => $r['promedio'],   // <-- nuevo campo
-        'resultado' => $r['resultado'],
-        'proxima'   => $proxima,
-        'estado'    => $r['status']
-    ];
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode(['error' => 'Error interno: ' . $e->getMessage()]);
 }
-
-
-// === Output ===
-echo json_encode([
-    'kpi' => [
-        'aprobadas'  => $kpiAprobadas,
-        'fallas'     => $kpiFallas,
-        'pendientes' => $kpiPendientes,
-        'fueraUso'   => $kpiFueraUso
-    ],
-    'series'  => $series,
-    'estados' => $estados,
-    'pareto'  => $pareto,
-    'tabla'   => $tabla
-], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);

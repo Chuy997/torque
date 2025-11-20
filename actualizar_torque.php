@@ -1,16 +1,19 @@
 <?php
 // /var/www/html/torque/actualizar_torque.php
-require_once __DIR__ . '/includes/bootstrap.php'; // sesión segura + helpers + $conn
-require_login('admin'); // sólo Admin puede actualizar torques
+require_once __DIR__ . '/includes/bootstrap.php';
+require_auth('admin'); // sólo Admin puede actualizar torques
 
-include __DIR__ . '/header.php';
+function h(?string $s): string { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
+$pdo = pdo();
 $errors = [];
-$ok     = null;
+$ok = null;
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
-    // CSRF obligatorio
-    csrf_verify_or_die($_POST['csrf_token'] ?? null);
+    // CSRF
+    if (!isset($_POST['csrf']) || !csrf_validate($_POST['csrf'])) {
+        $errors[] = 'Sesión expirada. Vuelve a intentar.';
+    }
 
     // Entradas
     $torqueID   = trim((string)($_POST['torque_id'] ?? ''));
@@ -46,76 +49,76 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
     // Verificar que el torque exista
     if (empty($errors)) {
-        $q = $conn->prepare("SELECT torque, status FROM torques WHERE torqueID = ?");
-        $q->bind_param('s', $torqueID);
-        $q->execute();
-        $res = $q->get_result();
-        if ($res->num_rows === 0) {
+        $q = $pdo->prepare("SELECT torque, status FROM torques WHERE torqueID = ?");
+        $q->execute([$torqueID]);
+        $current = $q->fetch();
+        if (!$current) {
             $errors[] = 'No existe un torque con ese ID.';
-        } else {
-            $current = $res->fetch_assoc();
         }
     }
 
     // Ejecutar cambios
     if (empty($errors)) {
-        if ($status === 'fuera de uso' || $status === 'calibracion fallida') {
-            // Sólo cambiar estado
-            $stmt = $conn->prepare("UPDATE torques SET status = ? WHERE torqueID = ?");
-            $stmt->bind_param('ss', $status, $torqueID);
-            $action = "Estado cambiado a {$status}. Motivo: {$reason}";
-        } else {
-            // Activo: requiere nuevo torque
-            $stmt = $conn->prepare("UPDATE torques SET torque = ?, status = ? WHERE torqueID = ?");
-            $stmt->bind_param('dss', $newTorque, $status, $torqueID);
-            $action = "Torque actualizado a {$newTorque}, estado cambiado a {$status}. Motivo: {$reason}";
-        }
-
         try {
-            $stmt->execute();
+            $pdo->beginTransaction();
+
+            if ($status === 'fuera de uso' || $status === 'calibracion fallida') {
+                // Sólo cambiar estado
+                $stmt = $pdo->prepare("UPDATE torques SET status = ? WHERE torqueID = ?");
+                $stmt->execute([$status, $torqueID]);
+                $action = "Estado cambiado a {$status}. Motivo: {$reason}";
+            } else {
+                // Activo: requiere nuevo torque
+                $stmt = $pdo->prepare("UPDATE torques SET torque = ?, status = ? WHERE torqueID = ?");
+                $stmt->execute([$newTorque, $status, $torqueID]);
+                $action = "Torque actualizado a {$newTorque}, estado cambiado a {$status}. Motivo: {$reason}";
+            }
 
             // Registrar historial
-            $h = $conn->prepare("INSERT INTO history (torqueID, action) VALUES (?, ?)");
-            $h->bind_param('ss', $torqueID, $action);
-            $h->execute();
+            $h = $pdo->prepare("INSERT INTO history (torqueID, action) VALUES (?, ?)");
+            $h->execute([$torqueID, $action]);
 
+            $pdo->commit();
             $ok = 'Torque actualizado correctamente.';
-        } catch (mysqli_sql_exception $e) {
+        } catch (Throwable $e) {
+            $pdo->rollBack();
             $errors[] = 'No se pudo actualizar el torque.';
         }
     }
 }
 
-// Obtener torques activos para el selector (mantenemos lógica original)
-$list = $conn->query("SELECT torqueID, torque, status FROM torques WHERE status = 'activo' ORDER BY torqueID ASC");
+// Obtener torques activos para el selector
+$list = $pdo->query("SELECT torqueID, torque, status FROM torques WHERE status = 'activo' ORDER BY torqueID ASC");
+$torques = $list->fetchAll(PDO::FETCH_ASSOC);
 ?>
+<?php include __DIR__ . '/header.php'; ?>
 <main class="container mt-5">
     <h1 class="mb-4">Actualizar Torque</h1>
 
     <?php if (!empty($errors)): ?>
         <div class="alert alert-danger" role="alert">
-            <?= htmlspecialchars(implode(' ', $errors), ENT_QUOTES, 'UTF-8') ?>
+            <?php foreach ($errors as $err): ?>
+                <div><?= h($err) ?></div>
+            <?php endforeach; ?>
         </div>
     <?php elseif (!empty($ok)): ?>
         <div class="alert alert-success" role="alert">
-            <?= htmlspecialchars($ok, ENT_QUOTES, 'UTF-8') ?>
+            <?= h($ok) ?>
         </div>
     <?php endif; ?>
 
     <form action="" method="POST" autocomplete="off" novalidate>
-        <?= csrf_field() ?>
+        <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
         <div class="form-group">
             <label for="torque_id">Seleccionar Torque ID:</label>
             <select id="torque_id" name="torque_id" class="form-control" required>
-                <?php while ($row = $list->fetch_assoc()): ?>
-                    <label>
-                        <option value="<?= htmlspecialchars($row['torqueID'], ENT_QUOTES, 'UTF-8') ?>">
-                            <?= htmlspecialchars($row['torqueID'], ENT_QUOTES, 'UTF-8') ?>
-                            (Torque Actual: <?= htmlspecialchars($row['torque'], ENT_QUOTES, 'UTF-8') ?>,
-                            Estado: <?= htmlspecialchars($row['status'], ENT_QUOTES, 'UTF-8') ?>)
-                        </option>
-                    </label>
-                <?php endwhile; ?>
+                <?php foreach ($torques as $row): ?>
+                    <option value="<?= h($row['torqueID']) ?>">
+                        <?= h($row['torqueID']) ?>
+                        (Torque Actual: <?= h($row['torque']) ?>,
+                        Estado: <?= h($row['status']) ?>)
+                    </option>
+                <?php endforeach; ?>
             </select>
         </div>
 

@@ -1,7 +1,6 @@
 <?php
-// /var/www/html/torque/index.php
-require_once __DIR__ . '/includes/bootstrap.php'; // sesión segura + helpers + $conn
-require_login(); // exige usuario autenticado
+require_once __DIR__ . '/includes/bootstrap.php';
+require_auth();
 
 include __DIR__ . '/header.php';
 
@@ -26,7 +25,9 @@ $query = "
   ORDER BY t.torqueID ASC
 ";
 
-$result = $conn->query($query);
+$pdo = pdo();
+$stmt = $pdo->query($query);
+$result = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <main class="container mt-5">
   <h1>Registros de Calibración Recientes</h1>
@@ -41,7 +42,7 @@ $result = $conn->query($query);
       </tr>
     </thead>
     <tbody>
-      <?php while ($row = $result->fetch_assoc()): ?>
+      <?php foreach ($result as $row): ?>
         <tr>
           <td><?= htmlspecialchars($row['torqueID'], ENT_QUOTES, 'UTF-8') ?></td>
           <td>
@@ -57,7 +58,7 @@ $result = $conn->query($query);
           <td><?= $row['resultado'] !== null ? htmlspecialchars($row['resultado'], ENT_QUOTES, 'UTF-8') : '<em>Sin calibración</em>' ?></td>
           <td><?= $row['fechaCalibracion'] !== null ? htmlspecialchars($row['fechaCalibracion'], ENT_QUOTES, 'UTF-8') : '<em>Nunca</em>' ?></td>
         </tr>
-      <?php endwhile; ?>
+      <?php endforeach; ?>
     </tbody>
   </table>
 </main>

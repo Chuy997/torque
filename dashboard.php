@@ -1,7 +1,7 @@
 <?php
 // /var/www/html/torque/dashboard.php
 require_once __DIR__ . '/includes/bootstrap.php';
-require_login();
+require_auth();
 
 include __DIR__ . '/header.php';
 ?>

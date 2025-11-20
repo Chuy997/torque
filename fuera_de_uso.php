@@ -1,16 +1,19 @@
 <?php
 // /var/www/html/torque/fuera_de_uso.php
-require_once __DIR__ . '/includes/bootstrap.php'; // sesión segura + helpers + $conn
-require_login('admin'); // Sólo admin puede reactivar
+require_once __DIR__ . '/includes/bootstrap.php';
+require_auth('admin'); // Sólo admin puede reactivar
 
-include __DIR__ . '/header.php';
+function h(?string $s): string { return htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8'); }
 
+$pdo = pdo();
 $errors = [];
-$ok     = null;
+$ok = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // CSRF
-    csrf_verify_or_die($_POST['csrf_token'] ?? null);
+    if (!isset($_POST['csrf']) || !csrf_validate($_POST['csrf'])) {
+        $errors[] = 'Sesión expirada. Vuelve a intentar.';
+    }
 
     // Entradas
     $torqueID   = trim((string)($_POST['torque_id'] ?? ''));
@@ -30,14 +33,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // Verificar existencia y estado actual
     if (empty($errors)) {
-        $q = $conn->prepare("SELECT status FROM torques WHERE torqueID = ?");
-        $q->bind_param('s', $torqueID);
-        $q->execute();
-        $res = $q->get_result();
-        if ($res->num_rows === 0) {
+        $q = $pdo->prepare("SELECT status FROM torques WHERE torqueID = ?");
+        $q->execute([$torqueID]);
+        $row = $q->fetch();
+        if (!$row) {
             $errors[] = 'No existe un torque con ese ID.';
         } else {
-            $row = $res->fetch_assoc();
             if (!in_array($row['status'], ['fuera de uso','calibracion fallida'], true)) {
                 $errors[] = 'Sólo se pueden reactivar torques en “fuera de uso” o “calibracion fallida”.';
             } else {
@@ -50,63 +51,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (empty($errors)) {
         $newTorque = (float)$newTorqueS;
 
-        $u = $conn->prepare("UPDATE torques SET torque = ?, status = 'activo' WHERE torqueID = ?");
-        $u->bind_param('ds', $newTorque, $torqueID);
-
         try {
-            $u->execute();
+            $pdo->beginTransaction();
+
+            $u = $pdo->prepare("UPDATE torques SET torque = ?, status = 'activo' WHERE torqueID = ?");
+            $u->execute([$newTorque, $torqueID]);
 
             // Historial
             $msg = "Reactivado a ACTIVO (venía de '{$prev_status}'). Nuevo torque={$newTorque}. Motivo: {$reason}";
-            $h   = $conn->prepare("INSERT INTO history (torqueID, action) VALUES (?, ?)");
-            $h->bind_param('ss', $torqueID, $msg);
-            $h->execute();
+            $h   = $pdo->prepare("INSERT INTO history (torqueID, action) VALUES (?, ?)");
+            $h->execute([$torqueID, $msg]);
 
+            $pdo->commit();
             $ok = 'Torque reactivado correctamente.';
-        } catch (mysqli_sql_exception $e) {
+        } catch (Throwable $e) {
+            $pdo->rollBack();
             $errors[] = 'No se pudo reactivar el torque.';
         }
     }
 }
 
 // Listar torques reactivables
-$list = $conn->query("
+$list = $pdo->query("
     SELECT torqueID, torque, status
     FROM torques
     WHERE status IN ('fuera de uso','calibracion fallida')
     ORDER BY torqueID ASC
 ");
+$torques = $list->fetchAll(PDO::FETCH_ASSOC);
 ?>
+<?php include __DIR__ . '/header.php'; ?>
 <main class="container mt-5">
     <h1 class="mb-4">Reactivar Torques Fuera de Uso / Calibración Fallida</h1>
 
     <?php if (!empty($errors)): ?>
         <div class="alert alert-danger" role="alert">
-            <?= htmlspecialchars(implode(' ', $errors), ENT_QUOTES, 'UTF-8') ?>
+            <?php foreach ($errors as $err): ?>
+                <div><?= h($err) ?></div>
+            <?php endforeach; ?>
         </div>
     <?php elseif (!empty($ok)): ?>
         <div class="alert alert-success" role="alert">
-            <?= htmlspecialchars($ok, ENT_QUOTES, 'UTF-8') ?>
+            <?= h($ok) ?>
         </div>
     <?php endif; ?>
 
-    <?php if ($list->num_rows === 0): ?>
+    <?php if (empty($torques)): ?>
         <div class="alert alert-info" role="alert">
             No hay torques en estado “fuera de uso” o “calibración fallida”.
         </div>
     <?php else: ?>
         <form action="" method="POST" autocomplete="off" novalidate>
-            <?= csrf_field() ?>
+            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
             <div class="form-group">
                 <label for="torque_id">Seleccionar Torque ID:</label>
                 <select id="torque_id" name="torque_id" class="form-control" required>
-                    <?php while ($row = $list->fetch_assoc()): ?>
-                        <option value="<?= htmlspecialchars($row['torqueID'], ENT_QUOTES, 'UTF-8') ?>">
-                            <?= htmlspecialchars($row['torqueID'], ENT_QUOTES, 'UTF-8') ?>
-                            (Torque actual: <?= htmlspecialchars($row['torque'], ENT_QUOTES, 'UTF-8') ?>,
-                            Estado: <?= htmlspecialchars($row['status'], ENT_QUOTES, 'UTF-8') ?>)
+                    <?php foreach ($torques as $row): ?>
+                        <option value="<?= h($row['torqueID']) ?>">
+                            <?= h($row['torqueID']) ?>
+                            (Torque actual: <?= h($row['torque']) ?>,
+                            Estado: <?= h($row['status']) ?>)
                         </option>
-                    <?php endwhile; ?>
+                    <?php endforeach; ?>
                 </select>
             </div>
 

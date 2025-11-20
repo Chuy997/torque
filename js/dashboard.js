@@ -1,136 +1,90 @@
-document.addEventListener("DOMContentLoaded", async function () {
-  try {
-    const resp = await fetch("api/dashboard_data.php");
-    if (!resp.ok) throw new Error("Error HTTP " + resp.status);
-    const data = await resp.json();
+// /var/www/html/torque/js/dashboard.js
+document.addEventListener('DOMContentLoaded', () => {
+    const url = '/torque/api/dashboard_data.php';
 
-    // === KPIs ===
-    document.getElementById("kpi-aprobadas").textContent = data.kpi.aprobadas + " %";
-    document.getElementById("kpi-falla").textContent     = data.kpi.fallas + " %";
-    document.getElementById("kpi-pendientes").textContent= data.kpi.pendientes;
-    document.getElementById("kpi-fuerauso").textContent  = data.kpi.fueraUso;
+    fetch(url)
+        .then(response => {
+            if (!response.ok) throw new Error('Network response was not ok');
+            return response.json();
+        })
+        .then(data => {
+            // KPIs
+            document.getElementById('kpi-aprobadas').textContent = data.kpi.aprobadas_pct + '%';
+            document.getElementById('kpi-falla').textContent = data.kpi.fallas_pct + '%';
+            document.getElementById('kpi-pendientes').textContent = data.kpi.pendientes;
+            document.getElementById('kpi-fuerauso').textContent = data.kpi.fuera_uso;
 
-    // === Gráfica barras (aprobadas vs fallas por semana) ===
-    const ctxBar = document.getElementById("chartBar");
-    new Chart(ctxBar, {
-      type: "bar",
-      data: {
-        labels: data.series.map(r => r.semana),
-        datasets: [
-          { label: "Aprobadas", data: data.series.map(r => r.aprobadas), backgroundColor: "rgba(0, 200, 83, 0.7)" },
-          { label: "Fallas",    data: data.series.map(r => r.fallas),    backgroundColor: "rgba(229, 57, 53, 0.7)" }
-        ]
-      },
-      options: {
-        responsive: true,
-        plugins: {
-          legend: { labels: { color: "#ffffff" } },
-          tooltip: { titleColor: "#ffffff", bodyColor: "#ffffff" }
-        },
-        scales: {
-          x: { ticks: { color: "#ffffff" }, grid: { color: "#444" } },
-          y: { ticks: { color: "#ffffff" }, grid: { color: "#444" } }
-        }
-      }
-    });
+            // Gráfica Bar (aprobadas vs fallas por semana)
+            const ctxBar = document.getElementById('chartBar').getContext('2d');
+            new Chart(ctxBar, {
+                type: 'bar',
+                data: {
+                    labels: data.chartBar.map(r => 'Semana ' + r.semana),
+                    datasets: [
+                        {
+                            label: 'Aprobadas',
+                            data: data.chartBar.map(r => r.aprobadas),
+                            backgroundColor: '#28a745'
+                        },
+                        {
+                            label: 'Fallas',
+                            data: data.chartBar.map(r => r.fallas),
+                            backgroundColor: '#dc3545'
+                        }
+                    ]
+                },
+                options: { responsive: true }
+            });
 
-    // === Gráfica línea (% aprobadas por semana) ===
-    const ctxLine = document.getElementById("chartLine");
-    new Chart(ctxLine, {
-      type: "line",
-      data: {
-        labels: data.series.map(r => r.semana),
-        datasets: [
-          {
-            label: "% Aprobadas",
-            data: data.series.map(r => r.pct_ok),
-            fill: false,
-            borderWidth: 2,
-            tension: 0.25
-          }
-        ]
-      },
-      options: {
-        responsive: true,
-        plugins: {
-          legend: { labels: { color: "#ffffff" } },
-          tooltip: { titleColor: "#ffffff", bodyColor: "#ffffff" }
-        },
-        scales: {
-          x: { ticks: { color: "#ffffff" }, grid: { color: "#444" } },
-          y: { ticks: { color: "#ffffff" }, grid: { color: "#444" }, suggestedMin: 0, suggestedMax: 100 }
-        }
-      }
-    });
+            // Gráfica Line (tendencia histórica % aprobadas)
+            const ctxLine = document.getElementById('chartLine').getContext('2d');
+            new Chart(ctxLine, {
+                type: 'line',
+                data: {
+                    labels: data.chartBar.map(r => 'Semana ' + r.semana),
+                    datasets: [{
+                        label: '% Aprobadas',
+                        data: data.chartBar.map(r => r.aprobadas ? (r.aprobadas / (r.aprobadas + r.fallas)) * 100 : 0),
+                        borderColor: '#007bff',
+                        fill: false
+                    }]
+                },
+                options: { responsive: true }
+            });
 
-    // === Gráfica donut (estados torques) ===
-    const ctxDonut = document.getElementById("chartDonut");
-    new Chart(ctxDonut, {
-      type: "doughnut",
-      data: {
-        labels: Object.keys(data.estados),
-        datasets: [{
-          data: Object.values(data.estados),
-          backgroundColor: [
-            "rgba(123, 31, 162, 0.7)",
-            "rgba(255, 193, 7, 0.7)",
-            "rgba(244, 67, 54, 0.7)"
-          ]
-        }]
-      },
-      options: {
-        responsive: true,
-        plugins: {
-          legend: { labels: { color: "#ffffff" } },
-          tooltip: { titleColor: "#ffffff", bodyColor: "#ffffff" }
-        }
-      }
-    });
+            // Gráfica Donut (estados actuales)
+            const ctxDonut = document.getElementById('chartDonut').getContext('2d');
+            new Chart(ctxDonut, {
+                type: 'doughnut',
+                data: {
+                    labels: data.chartDonut.map(r => r.status),
+                    datasets: [{
+                        data: data.chartDonut.map(r => r.count),
+                        backgroundColor: ['#28a745', '#ffc107', '#dc3545']
+                    }]
+                },
+                options: { responsive: true }
+            });
 
-    // === Gráfica Pareto de fallas (barras) ===
-    const ctxPareto = document.getElementById("chartPareto");
-    new Chart(ctxPareto, {
-      type: "bar",
-      data: {
-        labels: data.pareto.map(r => r.torqueID),
-        datasets: [
-          { label: "Fallas", data: data.pareto.map(r => r.fails), backgroundColor: "rgba(229, 57, 53, 0.8)" }
-        ]
-      },
-      options: {
-        responsive: true,
-        plugins: {
-          legend: { labels: { color: "#ffffff" } },
-          tooltip: { titleColor: "#ffffff", bodyColor: "#ffffff" }
-        },
-        scales: {
-          x: { ticks: { color: "#ffffff" }, grid: { color: "#444" } },
-          y: { ticks: { color: "#ffffff" }, grid: { color: "#444" }, beginAtZero: true }
-        }
-      }
-    });
+            // Tabla dinámica
+            const tbody = document.getElementById('tabla-detalle');
+            tbody.innerHTML = '';
+            data.tabla.forEach(row => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${row.torqueID}</td>
+                    <td>${row.fechaCalibracion || 'Nunca'}</td>
+                    <td>${row.promedio !== null ? row.promedio.toFixed(2) : 'Sin datos'}</td>
+                    <td>${row.resultado || 'Sin calibración'}</td>
+                    <td>—</td>
+                    <td>${row.status || 'Desconocido'}</td>
+                `;
+                tbody.appendChild(tr);
+            });
 
-        // === Tabla detalle ===
-    const tbody = document.getElementById("tabla-detalle");
-    tbody.innerHTML = "";
-    data.tabla.forEach(f => {
-      const tr = document.createElement("tr");
-      const color = (f.resultado === "aprobado") ? "text-success" :
-                    (f.resultado === "fuera de tolerancia") ? "text-danger" : "text-light";
-      const promTxt = (f.promedio !== null && f.promedio !== undefined)
-                        ? Number(f.promedio).toFixed(2)
-                        : "-";
-      tr.innerHTML = `<td>${f.id}</td>
-                      <td>${f.ultima ?? "-"}</td>
-                      <td>${promTxt}</td>
-                      <td class="${color}">${f.resultado ?? "-"}</td>
-                      <td>${f.proxima ?? "-"}</td>
-                      <td>${f.estado}</td>`;
-      tbody.appendChild(tr);
-    });
-
-  } catch (err) {
-    console.error("Error cargando dashboard:", err);
-    alert("No se pudieron cargar los datos del dashboard.");
-  }
+        })
+        .catch(error => {
+            console.error('Error cargando dashboard:', error);
+            alert('Error al cargar los datos. Revisa la consola.');
+        });
 });
